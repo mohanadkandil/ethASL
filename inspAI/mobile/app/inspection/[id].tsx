@@ -13,13 +13,80 @@ import {
   Image,
   Alert,
   ScrollView,
+  Modal,
+  Share,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Stack } from "expo-router";
 import { BlurView } from "expo-blur";
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { CactusLM, type Message as CactusMessage } from "cactus-react-native";
+import * as Print from "expo-print";
+import * as Sharing from "expo-sharing";
+import * as FileSystem from "expo-file-system";
+import { CactusLM, type Message as CactusMessage, type Tool } from "cactus-react-native";
+
+const VISION_TOOLS: Tool[] = [
+  {
+    name: "report_damage",
+    description: "Report the structured damage analysis from the image. Always use this tool to provide your analysis.",
+    parameters: {
+      type: "object",
+      properties: {
+        severity: {
+          type: "number",
+          description: "Damage severity from 1-10 (1=minor scratch, 10=total loss)",
+        },
+        damage_type: {
+          type: "string",
+          description: "Primary type of damage: dent, scratch, crack, shatter, bend, rust, burn, flood, or other",
+        },
+        affected_area: {
+          type: "string",
+          description: "Location on the vehicle: front bumper, rear bumper, hood, roof, door, fender, windshield, headlight, taillight, wheel, undercarriage, or interior",
+        },
+        description: {
+          type: "string",
+          description: "Detailed description of the visible damage",
+        },
+        repair_estimate: {
+          type: "string",
+          description: "Estimated repair category: minor (under $500), moderate ($500-$2500), major ($2500-$10000), or severe (over $10000)",
+        },
+      },
+      required: ["severity", "damage_type", "affected_area", "description", "repair_estimate"],
+    },
+  },
+];
+
+const TEXT_TOOLS: Tool[] = [
+  {
+    name: "generate_report",
+    description: "Generate a formatted insurance inspection report from the conversation. Call this when the user indicates they are done with the inspection, says 'ok', 'done', 'generate report', 'finish', 'complete', or asks for a summary/report.",
+    parameters: {
+      type: "object",
+      properties: {
+        severity: {
+          type: "number",
+          description: "Overall damage severity from 1-10",
+        },
+        summary: {
+          type: "string",
+          description: "Brief 1-2 sentence summary of the damage",
+        },
+        damage_description: {
+          type: "string",
+          description: "Detailed description of all damage found",
+        },
+        recommendations: {
+          type: "string",
+          description: "Recommended next steps for the claim",
+        },
+      },
+      required: ["severity", "summary", "damage_description", "recommendations"],
+    },
+  },
+];
 
 type StoredDocument = {
   id: string;
@@ -37,6 +104,14 @@ type Source = {
   score: number;
 };
 
+type DamageAnalysis = {
+  severity: number;
+  damage_type: string;
+  affected_area: string;
+  description: string;
+  repair_estimate: string;
+};
+
 type Message = {
   id: string;
   text: string;
@@ -45,6 +120,21 @@ type Message = {
   sources?: Source[];
   isSearching?: boolean;
   reasoning?: string;
+  pdfUri?: string;
+  report?: Report;
+  damageAnalysis?: DamageAnalysis;
+};
+
+type Report = {
+  id: string;
+  date: string;
+  time: string;
+  summary: string;
+  severity: string;
+  damageDescription: string;
+  recommendations: string;
+  images: string[];
+  policyReferences: string[];
 };
 
 // Cosine similarity between two vectors
@@ -80,6 +170,9 @@ export default function InspectionScreen() {
   const [expandedReasoning, setExpandedReasoning] = useState<Set<string>>(
     new Set(),
   );
+  const [showReport, setShowReport] = useState(false);
+  const [report, setReport] = useState<Report | null>(null);
+  const [generatingReport, setGeneratingReport] = useState(false);
 
   const toggleSources = useCallback((messageId: string) => {
     setExpandedSources((prev) => {
@@ -104,6 +197,126 @@ export default function InspectionScreen() {
       return next;
     });
   }, []);
+
+  const generateReport = async () => {
+    if (!textModel || messages.length < 2) {
+      Alert.alert("Not enough data", "Please complete the inspection first.");
+      return;
+    }
+
+    setGeneratingReport(true);
+
+    try {
+      // Collect all images from chat
+      const images = messages.filter(m => m.image).map(m => m.image!);
+
+      // Collect all AI responses (damage assessments)
+      const assessments = messages.filter(m => !m.isUser && m.text && !m.isSearching).map(m => m.text);
+
+      // Collect policy references
+      const policyRefs: string[] = [];
+      messages.forEach(m => {
+        if (m.sources) {
+          m.sources.forEach(s => {
+            if (!policyRefs.includes(s.chunk.substring(0, 100))) {
+              policyRefs.push(s.chunk.substring(0, 100) + "...");
+            }
+          });
+        }
+      });
+
+      // Build context for report generation
+      const chatContext = messages
+        .filter(m => m.text && !m.isSearching)
+        .map(m => `${m.isUser ? "Inspector" : "AI"}: ${m.text}`)
+        .join("\n");
+
+      const prompt = `Based on this inspection conversation, generate a structured insurance claim report. Extract:
+1. Overall severity (1-10)
+2. Brief summary (1-2 sentences)
+3. Detailed damage description
+4. Recommendations for next steps
+
+Conversation:
+${chatContext}
+
+Respond in this exact format:
+SEVERITY: [number]
+SUMMARY: [text]
+DAMAGE: [text]
+RECOMMENDATIONS: [text]`;
+
+      const result = await textModel.complete({
+        messages: [
+          { role: "system", content: "You are an insurance report generator. Be concise and professional." },
+          { role: "user", content: prompt }
+        ]
+      });
+
+      const response = result.response;
+
+      // Parse the response
+      const severityMatch = response.match(/SEVERITY:\s*(\d+)/i);
+      const summaryMatch = response.match(/SUMMARY:\s*(.+?)(?=DAMAGE:|$)/is);
+      const damageMatch = response.match(/DAMAGE:\s*(.+?)(?=RECOMMENDATIONS:|$)/is);
+      const recsMatch = response.match(/RECOMMENDATIONS:\s*(.+?)$/is);
+
+      const now = new Date();
+      const newReport: Report = {
+        id: `RPT-${Date.now()}`,
+        date: now.toLocaleDateString(),
+        time: now.toLocaleTimeString(),
+        severity: severityMatch ? severityMatch[1] : "N/A",
+        summary: summaryMatch ? summaryMatch[1].trim() : assessments[0] || "Inspection completed.",
+        damageDescription: damageMatch ? damageMatch[1].trim() : assessments.join("\n\n"),
+        recommendations: recsMatch ? recsMatch[1].trim() : "Submit for review.",
+        images,
+        policyReferences: policyRefs,
+      };
+
+      setReport(newReport);
+      setShowReport(true);
+    } catch (e) {
+      console.error("Report generation error:", e);
+      Alert.alert("Error", "Failed to generate report.");
+    } finally {
+      setGeneratingReport(false);
+    }
+  };
+
+  const shareReport = async () => {
+    if (!report) return;
+
+    const reportText = `
+INSPECTION REPORT
+=================
+Report ID: ${report.id}
+Date: ${report.date} ${report.time}
+
+SEVERITY: ${report.severity}/10
+
+SUMMARY:
+${report.summary}
+
+DAMAGE DESCRIPTION:
+${report.damageDescription}
+
+RECOMMENDATIONS:
+${report.recommendations}
+
+IMAGES ATTACHED: ${report.images.length}
+POLICY REFERENCES: ${report.policyReferences.length}
+
+---
+Generated by inspAI
+    `.trim();
+
+    try {
+      await Share.share({ message: reportText });
+    } catch (e) {
+      console.error("Share error:", e);
+    }
+  };
 
   useEffect(() => {
     loadModels();
@@ -230,11 +443,199 @@ export default function InspectionScreen() {
     return { clean, reasoning };
   };
 
+  const generatePdfFromReport = async (reportData: Report): Promise<string | null> => {
+    try {
+      // Convert images to base64 for embedding in PDF
+      const imageHtml = await Promise.all(
+        reportData.images.slice(0, 4).map(async (uri, idx) => {
+          try {
+            const base64 = await FileSystem.readAsStringAsync(uri, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+            return `<img src="data:image/jpeg;base64,${base64}" style="width:200px;height:150px;object-fit:cover;border-radius:8px;margin:4px;" />`;
+          } catch {
+            return "";
+          }
+        })
+      );
+
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <style>
+            body { font-family: -apple-system, sans-serif; padding: 40px; color: #333; }
+            .header { text-align: center; margin-bottom: 30px; }
+            .logo { font-size: 24px; font-weight: bold; color: #007AFF; }
+            .report-id { color: #888; font-size: 14px; margin-top: 8px; }
+            .severity-box { background: #000; color: #fff; padding: 30px; border-radius: 16px; text-align: center; margin: 20px 0; }
+            .severity-label { font-size: 12px; color: #888; text-transform: uppercase; }
+            .severity-value { font-size: 64px; font-weight: 800; }
+            .section { background: #f5f5f5; padding: 20px; border-radius: 12px; margin: 16px 0; }
+            .section-title { font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+            .section-content { font-size: 15px; line-height: 1.6; }
+            .images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+            .footer { text-align: center; margin-top: 40px; color: #888; font-size: 12px; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div class="logo">inspAI</div>
+            <div class="report-id">${reportData.id}</div>
+            <div class="report-id">${reportData.date} at ${reportData.time}</div>
+          </div>
+
+          <div class="severity-box">
+            <div class="severity-label">Damage Severity</div>
+            <div class="severity-value">${reportData.severity}/10</div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Summary</div>
+            <div class="section-content">${reportData.summary}</div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Damage Description</div>
+            <div class="section-content">${reportData.damageDescription}</div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Recommendations</div>
+            <div class="section-content">${reportData.recommendations}</div>
+          </div>
+
+          ${reportData.images.length > 0 ? `
+          <div class="section">
+            <div class="section-title">Attached Images (${reportData.images.length})</div>
+            <div class="images">${imageHtml.join("")}</div>
+          </div>
+          ` : ""}
+
+          ${reportData.policyReferences.length > 0 ? `
+          <div class="section">
+            <div class="section-title">Policy References</div>
+            ${reportData.policyReferences.map(ref => `<div class="section-content" style="font-size:12px;margin-bottom:8px;">${ref}</div>`).join("")}
+          </div>
+          ` : ""}
+
+          <div class="footer">
+            Generated by inspAI - On-device AI Inspection
+          </div>
+        </body>
+        </html>
+      `;
+
+      const { uri } = await Print.printToFileAsync({ html });
+
+      // Move to a permanent location with proper name
+      const pdfName = `${reportData.id}.pdf`;
+      const pdfPath = `${FileSystem.documentDirectory}${pdfName}`;
+      await FileSystem.moveAsync({ from: uri, to: pdfPath });
+
+      return pdfPath;
+    } catch (e) {
+      console.error("PDF generation error:", e);
+      return null;
+    }
+  };
+
+  const openPdf = async (uri: string) => {
+    try {
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, {
+          mimeType: "application/pdf",
+          dialogTitle: "Inspection Report",
+        });
+      }
+    } catch (e) {
+      console.error("Error opening PDF:", e);
+    }
+  };
+
+  const handleToolCall = async (functionCalls: any[]): Promise<{ response: string; report: Report; pdfUri: string | null } | null> => {
+    for (const call of functionCalls) {
+      if (call.name === "generate_report") {
+        const args = call.arguments || {};
+        const images = messages.filter(m => m.image).map(m => m.image!);
+        const policyRefs: string[] = [];
+        messages.forEach(m => {
+          m.sources?.forEach(s => {
+            if (!policyRefs.includes(s.chunk.substring(0, 100))) {
+              policyRefs.push(s.chunk.substring(0, 100) + "...");
+            }
+          });
+        });
+
+        const damageAnalyses = messages
+          .filter(m => m.damageAnalysis)
+          .map(m => m.damageAnalysis!);
+
+        let severity = args.severity;
+        let damageDescription = args.damage_description;
+
+        if (damageAnalyses.length > 0) {
+          const avgSeverity = Math.round(
+            damageAnalyses.reduce((sum, d) => sum + d.severity, 0) / damageAnalyses.length
+          );
+          severity = severity || avgSeverity;
+
+          const structuredDesc = damageAnalyses.map((d, i) =>
+            `**Damage ${i + 1}:** ${d.damage_type} on ${d.affected_area} (Severity: ${d.severity}/10)\n${d.description}\nEstimated repair: ${d.repair_estimate}`
+          ).join("\n\n");
+
+          damageDescription = damageDescription || structuredDesc;
+        }
+
+        const now = new Date();
+        const newReport: Report = {
+          id: `RPT-${Date.now()}`,
+          date: now.toLocaleDateString(),
+          time: now.toLocaleTimeString(),
+          severity: String(severity || "N/A"),
+          summary: args.summary || (damageAnalyses.length > 0
+            ? `${damageAnalyses.length} damage area(s) identified. Primary damage: ${damageAnalyses[0].damage_type} on ${damageAnalyses[0].affected_area}.`
+            : "Inspection completed."),
+          damageDescription: damageDescription || "See chat history.",
+          recommendations: args.recommendations || "Submit for review.",
+          images,
+          policyReferences: policyRefs,
+        };
+
+        const pdfUri = await generatePdfFromReport(newReport);
+
+        setReport(newReport);
+
+        return {
+          response: `Report generated with ${damageAnalyses.length} damage assessment(s). Tap to view or share the PDF.`,
+          report: newReport,
+          pdfUri,
+        };
+      }
+    }
+    return null;
+  };
+
+  const formatDamageAnalysis = (analysis: DamageAnalysis): string => {
+    const severityLabel = analysis.severity <= 3 ? "Minor" : analysis.severity <= 6 ? "Moderate" : analysis.severity <= 8 ? "Significant" : "Severe";
+    return `**Damage Assessment**
+
+**Severity:** ${analysis.severity}/10 (${severityLabel})
+**Type:** ${analysis.damage_type}
+**Location:** ${analysis.affected_area}
+
+**Description:**
+${analysis.description}
+
+**Repair Estimate:** ${analysis.repair_estimate}`;
+  };
+
   const generateResponse = async (
     text: string,
     imageUri?: string,
     messageId?: string,
-  ): Promise<{ response: string; sources: Source[]; reasoning: string }> => {
+  ): Promise<{ response: string; sources: Source[]; reasoning: string; damageAnalysis?: DamageAnalysis }> => {
     const model = imageUri ? visionModel : textModel;
     if (!model)
       return { response: "Model not loaded.", sources: [], reasoning: "" };
@@ -255,15 +656,15 @@ export default function InspectionScreen() {
       }
 
       const systemPrompt = imageUri
-        ? "You are an inspection AI. Analyze the image for damage. Give: 1) Severity (1-10), 2) Description of damage, 3) Recommendations. Be concise and specific."
+        ? "You are a vehicle damage inspection AI. Analyze the image carefully and use the report_damage tool to provide a structured assessment. Look for dents, scratches, cracks, broken parts, and any other visible damage. Be thorough and accurate."
         : policyContext
-          ? `You are an insurance policy assistant. Answer questions using ONLY the policy context below. Be specific and cite section numbers when possible.
+          ? `You are an insurance policy assistant. Answer questions using ONLY the policy context below. Be specific and cite section numbers when possible. When the user is done or asks for a report, use the generate_report tool.
 
 POLICY CONTEXT:
 ${policyContext}`
-          : "You are an insurance assistant. Answer questions about insurance policies. If you don't have specific policy information, give general guidance.";
+          : "You are an insurance inspection assistant. Help analyze damage and answer policy questions. When the user indicates they are done (says 'ok', 'done', 'generate report', 'finish', etc.), use the generate_report tool to create a formal report.";
 
-      const messages: CactusMessage[] = [
+      const allMessages: CactusMessage[] = [
         { role: "system", content: systemPrompt },
         ...chatHistoryRef.current,
         userMsg,
@@ -277,13 +678,71 @@ ${policyContext}`
           const { clean } = cleanResponse(streamedText);
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === messageId ? { ...m, text: clean || "..." } : m,
+              m.id === messageId ? { ...m, text: clean || "Analyzing..." } : m,
             ),
           );
         }
       };
 
-      const result = await model.complete({ messages, onToken });
+      const tools = imageUri ? VISION_TOOLS : TEXT_TOOLS;
+
+      const result = await model.complete({
+        messages: allMessages,
+        onToken,
+        tools,
+        options: imageUri ? { forceTools: true } : undefined,
+      });
+
+      if (imageUri && result.functionCalls && result.functionCalls.length > 0) {
+        for (const call of result.functionCalls) {
+          if (call.name === "report_damage") {
+            const args = call.arguments as DamageAnalysis;
+            const formattedResponse = formatDamageAnalysis(args);
+
+            chatHistoryRef.current = [
+              ...chatHistoryRef.current,
+              { role: "user", content: "Image uploaded for damage analysis" },
+              { role: "assistant", content: formattedResponse },
+            ];
+
+            if (messageId) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === messageId
+                    ? { ...m, text: formattedResponse, damageAnalysis: args }
+                    : m
+                )
+              );
+            }
+
+            return { response: formattedResponse, sources: [], reasoning: "", damageAnalysis: args };
+          }
+        }
+      }
+
+      if (!imageUri && result.functionCalls && result.functionCalls.length > 0) {
+        const toolResult = await handleToolCall(result.functionCalls);
+        if (toolResult) {
+          chatHistoryRef.current = [
+            ...chatHistoryRef.current,
+            { role: "user", content: text },
+            { role: "assistant", content: toolResult.response },
+          ];
+
+          if (messageId && toolResult.pdfUri) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === messageId
+                  ? { ...m, text: toolResult.response, pdfUri: toolResult.pdfUri!, report: toolResult.report }
+                  : m
+              )
+            );
+          }
+
+          return { response: toolResult.response, sources, reasoning: "" };
+        }
+      }
+
       const { clean, reasoning } = cleanResponse(result.response);
 
       chatHistoryRef.current = [
@@ -351,7 +810,7 @@ ${policyContext}`
       ]);
     }
 
-    const { response, sources, reasoning } = await generateResponse(
+    const { response, sources, reasoning, damageAnalysis } = await generateResponse(
       msg || "Analyze this image for damage.",
       imageUri,
       thinkingId,
@@ -360,7 +819,7 @@ ${policyContext}`
     setMessages((prev) =>
       prev.map((m) =>
         m.id === thinkingId
-          ? { ...m, text: response, sources, reasoning, isSearching: false }
+          ? { ...m, text: response, sources, reasoning, damageAnalysis, isSearching: false }
           : m,
       ),
     );
@@ -449,12 +908,58 @@ ${policyContext}`
                     <Text style={styles.searchingText}>{item.text}</Text>
                   </View>
                 )}
-                {!item.isSearching && (
+                {!item.isSearching && !item.damageAnalysis && (
                   <Text
                     style={[styles.bubbleText, item.isUser && styles.userText]}
                   >
                     {item.text}
                   </Text>
+                )}
+
+                {/* Structured Damage Analysis Card */}
+                {item.damageAnalysis && (
+                  <View style={styles.damageCard}>
+                    <View style={styles.damageHeader}>
+                      <View style={[
+                        styles.severityBadge,
+                        item.damageAnalysis.severity <= 3 && styles.severityLow,
+                        item.damageAnalysis.severity > 3 && item.damageAnalysis.severity <= 6 && styles.severityMed,
+                        item.damageAnalysis.severity > 6 && styles.severityHigh,
+                      ]}>
+                        <Text style={styles.severityBadgeText}>{item.damageAnalysis.severity}/10</Text>
+                      </View>
+                      <View style={styles.damageHeaderText}>
+                        <Text style={styles.damageType}>{item.damageAnalysis.damage_type}</Text>
+                        <Text style={styles.damageLocation}>{item.damageAnalysis.affected_area}</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.damageDescription}>{item.damageAnalysis.description}</Text>
+                    <View style={styles.repairEstimate}>
+                      <Text style={styles.repairLabel}>Repair Estimate:</Text>
+                      <Text style={styles.repairValue}>{item.damageAnalysis.repair_estimate}</Text>
+                    </View>
+                  </View>
+                )}
+
+                {/* PDF Report Card */}
+                {item.pdfUri && item.report && (
+                  <TouchableOpacity
+                    style={styles.pdfCard}
+                    onPress={() => openPdf(item.pdfUri!)}
+                    onLongPress={() => {
+                      setReport(item.report!);
+                      setShowReport(true);
+                    }}
+                  >
+                    <View style={styles.pdfIcon}>
+                      <Text style={styles.pdfIconText}>PDF</Text>
+                    </View>
+                    <View style={styles.pdfInfo}>
+                      <Text style={styles.pdfTitle}>{item.report.id}</Text>
+                      <Text style={styles.pdfSubtitle}>Severity: {item.report.severity}/10 · Tap to share</Text>
+                    </View>
+                    <Text style={styles.pdfArrow}>›</Text>
+                  </TouchableOpacity>
                 )}
               </View>
 
@@ -561,6 +1066,17 @@ ${policyContext}`
             >
               <Text style={styles.actionText}>Gallery</Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              onPress={generateReport}
+              disabled={generatingReport || messages.length < 2}
+              style={[styles.reportBtn, (generatingReport || messages.length < 2) && styles.disabled]}
+            >
+              {generatingReport ? (
+                <ActivityIndicator size="small" color="#FFF" />
+              ) : (
+                <Text style={styles.reportBtnText}>Report</Text>
+              )}
+            </TouchableOpacity>
           </View>
 
           <View style={styles.inputRow}>
@@ -586,6 +1102,76 @@ ${policyContext}`
           </View>
         </BlurView>
       </KeyboardAvoidingView>
+
+      {/* Report Modal */}
+      <Modal
+        visible={showReport}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowReport(false)}
+      >
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Inspection Report</Text>
+            <TouchableOpacity onPress={() => setShowReport(false)}>
+              <Text style={styles.modalClose}>Done</Text>
+            </TouchableOpacity>
+          </View>
+
+          {report && (
+            <ScrollView style={styles.reportScroll} contentContainerStyle={styles.reportContent}>
+              <View style={styles.reportCard}>
+                <Text style={styles.reportId}>{report.id}</Text>
+                <Text style={styles.reportDate}>{report.date} at {report.time}</Text>
+              </View>
+
+              <View style={styles.severityCard}>
+                <Text style={styles.severityLabel}>SEVERITY</Text>
+                <Text style={styles.severityValue}>{report.severity}/10</Text>
+              </View>
+
+              <View style={styles.reportSection}>
+                <Text style={styles.sectionLabel}>SUMMARY</Text>
+                <Text style={styles.sectionText}>{report.summary}</Text>
+              </View>
+
+              <View style={styles.reportSection}>
+                <Text style={styles.sectionLabel}>DAMAGE DESCRIPTION</Text>
+                <Text style={styles.sectionText}>{report.damageDescription}</Text>
+              </View>
+
+              <View style={styles.reportSection}>
+                <Text style={styles.sectionLabel}>RECOMMENDATIONS</Text>
+                <Text style={styles.sectionText}>{report.recommendations}</Text>
+              </View>
+
+              {report.images.length > 0 && (
+                <View style={styles.reportSection}>
+                  <Text style={styles.sectionLabel}>ATTACHED IMAGES ({report.images.length})</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imagesRow}>
+                    {report.images.map((uri, idx) => (
+                      <Image key={idx} source={{ uri }} style={styles.reportImage} />
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
+
+              {report.policyReferences.length > 0 && (
+                <View style={styles.reportSection}>
+                  <Text style={styles.sectionLabel}>POLICY REFERENCES ({report.policyReferences.length})</Text>
+                  {report.policyReferences.map((ref, idx) => (
+                    <Text key={idx} style={styles.policyRef}>{ref}</Text>
+                  ))}
+                </View>
+              )}
+
+              <TouchableOpacity onPress={shareReport} style={styles.shareBtn}>
+                <Text style={styles.shareBtnText}>Share Report</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          )}
+        </View>
+      </Modal>
     </>
   );
 }
@@ -768,4 +1354,212 @@ const styles = StyleSheet.create({
   },
   disabled: { backgroundColor: "#CCC" },
   sendText: { color: "#FFF", fontSize: 15, fontWeight: "600" },
+
+  // Report button
+  reportBtn: {
+    backgroundColor: "#007AFF",
+    borderRadius: 12,
+    padding: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    minWidth: 80,
+  },
+  reportBtnText: { color: "#FFF", fontSize: 15, fontWeight: "600" },
+
+  // Modal styles
+  modalContainer: {
+    flex: 1,
+    backgroundColor: "#F5F5F5",
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: 16,
+    paddingTop: 20,
+    backgroundColor: "#FFF",
+    borderBottomWidth: 1,
+    borderBottomColor: "#EEE",
+  },
+  modalTitle: { fontSize: 18, fontWeight: "700", color: "#000" },
+  modalClose: { fontSize: 16, color: "#007AFF", fontWeight: "600" },
+
+  reportScroll: { flex: 1 },
+  reportContent: { padding: 16, paddingBottom: 40 },
+
+  reportCard: {
+    backgroundColor: "#FFF",
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 16,
+    alignItems: "center",
+  },
+  reportId: { fontSize: 14, fontWeight: "700", color: "#007AFF", marginBottom: 4 },
+  reportDate: { fontSize: 13, color: "#888" },
+
+  severityCard: {
+    backgroundColor: "#000",
+    borderRadius: 16,
+    padding: 24,
+    marginBottom: 16,
+    alignItems: "center",
+  },
+  severityLabel: { fontSize: 12, fontWeight: "600", color: "#888", marginBottom: 8 },
+  severityValue: { fontSize: 48, fontWeight: "800", color: "#FFF" },
+
+  reportSection: {
+    backgroundColor: "#FFF",
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+  },
+  sectionLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#888",
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  sectionText: { fontSize: 15, color: "#333", lineHeight: 22 },
+
+  imagesRow: { marginTop: 8 },
+  reportImage: {
+    width: 120,
+    height: 90,
+    borderRadius: 10,
+    marginRight: 10,
+  },
+
+  policyRef: {
+    fontSize: 12,
+    color: "#666",
+    backgroundColor: "#F5F5F5",
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 6,
+    lineHeight: 18,
+  },
+
+  shareBtn: {
+    backgroundColor: "#000",
+    borderRadius: 14,
+    padding: 16,
+    alignItems: "center",
+    marginTop: 16,
+  },
+  shareBtnText: { color: "#FFF", fontSize: 16, fontWeight: "600" },
+
+  damageCard: {
+    backgroundColor: "#F8F8F8",
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 4,
+    minWidth: 260,
+  },
+  damageHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 10,
+  },
+  damageHeaderText: {
+    flex: 1,
+  },
+  severityBadge: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  severityLow: {
+    backgroundColor: "#34C759",
+  },
+  severityMed: {
+    backgroundColor: "#FF9500",
+  },
+  severityHigh: {
+    backgroundColor: "#FF3B30",
+  },
+  severityBadgeText: {
+    color: "#FFF",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  damageType: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#000",
+    textTransform: "capitalize",
+  },
+  damageLocation: {
+    fontSize: 13,
+    color: "#666",
+    textTransform: "capitalize",
+  },
+  damageDescription: {
+    fontSize: 14,
+    color: "#333",
+    lineHeight: 20,
+    marginBottom: 10,
+  },
+  repairEstimate: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(0,0,0,0.05)",
+    borderRadius: 8,
+    padding: 10,
+    gap: 6,
+  },
+  repairLabel: {
+    fontSize: 12,
+    color: "#666",
+  },
+  repairValue: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#000",
+    textTransform: "capitalize",
+  },
+
+  pdfCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F5F5F5",
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 12,
+    gap: 12,
+  },
+  pdfIcon: {
+    width: 44,
+    height: 44,
+    backgroundColor: "#E53935",
+    borderRadius: 10,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  pdfIconText: {
+    color: "#FFF",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  pdfInfo: {
+    flex: 1,
+  },
+  pdfTitle: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#000",
+    marginBottom: 2,
+  },
+  pdfSubtitle: {
+    fontSize: 12,
+    color: "#666",
+  },
+  pdfArrow: {
+    fontSize: 24,
+    color: "#CCC",
+    fontWeight: "300",
+  },
 });
