@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xxd:*)",
+      "Bash(npm install:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(npm ls:*)",
+      "WebFetch(domain:cactuscompute.com)",
+      "Bash(xcode-select:*)",
+      "Bash(xcodebuild -version:*)"
+    ]
+  }
+}
