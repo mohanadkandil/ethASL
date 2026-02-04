@@ -6,12 +6,12 @@ export default function TabLayout() {
     <ThemeProvider value={DefaultTheme}>
       <NativeTabs disableTransparentOnScrollEdge>
         <NativeTabs.Trigger name="index">
-          <Label>Chat</Label>
-          <Icon sf="bubble.left.fill" md="chat" />
+          <Label>Home</Label>
+          <Icon sf="house.fill" md="home" />
         </NativeTabs.Trigger>
         <NativeTabs.Trigger name="explore">
-          <Label>Settings</Label>
-          <Icon sf="gearshape.fill" md="settings" />
+          <Label>Reports</Label>
+          <Icon sf="doc.text.fill" md="description" />
         </NativeTabs.Trigger>
       </NativeTabs>
     </ThemeProvider>
