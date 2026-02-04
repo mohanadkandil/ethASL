@@ -1,5 +1,5 @@
-import { NativeTabs, Icon, Label } from 'expo-router/unstable-native-tabs';
-import { ThemeProvider, DefaultTheme } from '@react-navigation/native';
+import { NativeTabs, Icon, Label } from "expo-router/unstable-native-tabs";
+import { ThemeProvider, DefaultTheme } from "@react-navigation/native";
 
 export default function TabLayout() {
   return (
@@ -10,7 +10,7 @@ export default function TabLayout() {
           <Icon sf="house.fill" md="home" />
         </NativeTabs.Trigger>
         <NativeTabs.Trigger name="explore">
-          <Label>Reports</Label>
+          <Label>Knowledge</Label>
           <Icon sf="doc.text.fill" md="description" />
         </NativeTabs.Trigger>
       </NativeTabs>

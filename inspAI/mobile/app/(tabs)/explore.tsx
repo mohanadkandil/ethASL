@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   StyleSheet,
   View,
@@ -13,6 +13,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BlurView } from "expo-blur";
 import * as DocumentPicker from "expo-document-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { CactusLM } from "cactus-react-native";
+import { extractText, isAvailable } from "expo-pdf-text-extract";
 
 type Document = {
   id: string;
@@ -49,10 +51,37 @@ export default function KnowledgeBaseScreen() {
   const [textInput, setTextInput] = useState("");
   const [docName, setDocName] = useState("");
   const [loading, setLoading] = useState(false);
+  const [modelLoading, setModelLoading] = useState(true);
+  const [modelProgress, setModelProgress] = useState(0);
+  const cactusRef = useRef<CactusLM | null>(null);
 
   useEffect(() => {
     loadDocuments();
+    loadEmbeddingModel();
+    return () => {
+      cactusRef.current?.destroy();
+    };
   }, []);
+
+  const loadEmbeddingModel = async () => {
+    try {
+      const lm = new CactusLM({
+        model: "qwen3-0.6b",
+        options: { quantization: "int4", contextSize: 512 },
+      });
+
+      await lm.download({
+        onProgress: (p) => setModelProgress(Math.round(p * 100)),
+      });
+
+      await lm.init();
+      cactusRef.current = lm;
+    } catch (e) {
+      console.error("Failed to load embedding model:", e);
+    } finally {
+      setModelLoading(false);
+    }
+  };
 
   const loadDocuments = async () => {
     try {
@@ -75,14 +104,44 @@ export default function KnowledgeBaseScreen() {
   const handlePickDocument = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: "text/*",
+        type: "*/*",
         copyToCacheDirectory: true,
       });
 
       if (!result.canceled && result.assets?.[0]) {
         const file = result.assets[0];
-        const response = await fetch(file.uri);
-        const text = await response.text();
+        const isPDF =
+          file.mimeType === "application/pdf" ||
+          file.name.toLowerCase().endsWith(".pdf");
+
+        let text = "";
+
+        if (isPDF) {
+          if (!isAvailable()) {
+            Alert.alert(
+              "Not Available",
+              "PDF extraction requires a development build.",
+            );
+            return;
+          }
+          try {
+            text = await extractText(file.uri);
+            if (!text || text.trim().length < 20) {
+              Alert.alert(
+                "No Text",
+                "Could not extract text. The PDF may be scanned/image-based.",
+              );
+              return;
+            }
+          } catch (e: any) {
+            Alert.alert("Error", e.message || "Failed to read PDF");
+            return;
+          }
+        } else {
+          const response = await fetch(file.uri);
+          text = await response.text();
+        }
+
         setTextInput(text);
         setDocName(file.name.replace(/\.[^/.]+$/, ""));
         setShowAdd(true);
@@ -92,9 +151,32 @@ export default function KnowledgeBaseScreen() {
     }
   };
 
+  const generateEmbedding = async (text: string): Promise<number[]> => {
+    if (!cactusRef.current) {
+      // Fallback to placeholder if model not loaded
+      return Array(384)
+        .fill(0)
+        .map(() => Math.random());
+    }
+    try {
+      const result = await cactusRef.current.embed({ text });
+      return result.embedding;
+    } catch (e) {
+      console.error("Embedding error:", e);
+      return Array(384)
+        .fill(0)
+        .map(() => Math.random());
+    }
+  };
+
   const handleAddDocument = async () => {
     if (!textInput.trim() || !docName.trim()) {
       Alert.alert("Error", "Please enter document name and content");
+      return;
+    }
+
+    if (modelLoading) {
+      Alert.alert("Please wait", "Embedding model is still loading");
       return;
     }
 
@@ -103,13 +185,11 @@ export default function KnowledgeBaseScreen() {
     try {
       const chunks = chunkText(textInput);
 
-      // For now, create placeholder embeddings
-      // In production, use Cactus embedding model
-      const embeddings = chunks.map(() =>
-        Array(384)
-          .fill(0)
-          .map(() => Math.random()),
-      );
+      const embeddings: number[][] = [];
+      for (let i = 0; i < chunks.length; i++) {
+        const embedding = await generateEmbedding(chunks[i]);
+        embeddings.push(embedding);
+      }
 
       const newDoc: Document = {
         id: Date.now().toString(),
@@ -146,33 +226,79 @@ export default function KnowledgeBaseScreen() {
   };
 
   const addSamplePolicy = async () => {
-    const samplePolicy = `
-    INSURANCE POLICY DOCUMENT - AUTO COVERAGE
+    const samplePolicy = `ALPINE MUTUAL INSURANCE COMPANY
+Policy Number: AMI-2024-VH-789456
+Effective Date: January 1, 2024 - December 31, 2024
 
-    Section 1: Coverage Overview
-    This policy provides comprehensive coverage for vehicle damage, liability, and personal injury protection.
+COMPREHENSIVE VEHICLE INSURANCE POLICY
 
-    Section 2: Collision Coverage
-    Covers damage to your vehicle from collision with another vehicle or object. Deductible: $500. Maximum coverage: $50,000.
+SECTION 1: POLICYHOLDER INFORMATION
+Policyholder: [Name on File]
+Coverage Type: Gold Premium Package
+Vehicle: [VIN on File]
 
-    Section 3: Comprehensive Coverage
-    Covers non-collision damage including theft, vandalism, fire, natural disasters, and falling objects. Deductible: $250. Maximum coverage: $50,000.
+SECTION 2: COLLISION COVERAGE
+Coverage Limit: $75,000 per incident
+Deductible: $500 standard / $250 for preferred members
+This coverage applies to damage resulting from collision with another vehicle, object, or rollover. Coverage includes towing up to 50 miles to nearest approved repair facility.
 
-    Section 4: Liability Coverage
-    Bodily injury liability: $100,000 per person, $300,000 per accident. Property damage liability: $50,000 per accident.
+SECTION 3: COMPREHENSIVE COVERAGE
+Coverage Limit: $75,000 per incident
+Deductible: $250
+Covers non-collision damage including: theft, vandalism, fire, hail, flooding, falling objects, animal collision, glass breakage, and civil disturbance damage.
 
-    Section 5: Exclusions
-    This policy does not cover: Pre-existing damage, intentional damage, damage while under influence, racing or competition use, commercial use without endorsement.
+SECTION 4: LIABILITY COVERAGE
+Bodily Injury: $250,000 per person / $500,000 per accident
+Property Damage: $100,000 per accident
+Medical Payments: $10,000 per person
+This coverage protects you if you are legally responsible for injuries or damage to others.
 
-    Section 6: Claims Process
-    All claims must include: Date and time of incident, photos of damage (minimum 3), police report number if applicable, witness information. Claims over $5,000 require in-person inspection.
+SECTION 5: UNINSURED/UNDERINSURED MOTORIST
+Coverage: $250,000 per person / $500,000 per accident
+Applies when at-fault party has no insurance or insufficient coverage.
 
-    Section 7: Depreciation
-    Actual cash value is determined by fair market value minus depreciation. Vehicles over 10 years old subject to 15% depreciation cap.
-    `;
+SECTION 6: RENTAL REIMBURSEMENT
+Daily Limit: $50/day
+Maximum Period: 30 days
+Available while your vehicle is being repaired at an approved facility.
+
+SECTION 7: DAMAGE ASSESSMENT GUIDELINES
+Minor Damage (Severity 1-3): Scratches, small dents, cosmetic damage. Estimated repair under $2,500. Standard claims process, no inspection required.
+Moderate Damage (Severity 4-6): Panel damage, bumper replacement, mechanical issues. Estimated repair $2,500-$10,000. Photo documentation required, may require inspection.
+Severe Damage (Severity 7-9): Structural damage, airbag deployment, major mechanical failure. Estimated repair over $10,000. Mandatory in-person inspection required.
+Total Loss (Severity 10): Damage exceeds 75% of vehicle actual cash value. Vehicle will be declared total loss. Settlement based on pre-loss fair market value.
+
+SECTION 8: CLAIMS PROCESS
+Step 1: Report incident within 72 hours via app, phone (1-800-ALPINE-1), or online portal.
+Step 2: Submit required documentation: photos of damage (minimum 4 angles), police report if applicable, witness statements, repair estimates.
+Step 3: Claims under $5,000 processed within 5 business days with approved documentation.
+Step 4: Claims over $5,000 require field inspection by Alpine Mutual adjuster within 7 business days.
+Step 5: Payment issued within 48 hours of claim approval via direct deposit or check.
+
+SECTION 9: EXCLUSIONS
+This policy does NOT cover:
+- Damage from racing, competition, or reckless driving
+- Intentional damage or fraud
+- Damage while operating under influence of drugs/alcohol
+- Commercial or rideshare use without endorsement
+- Pre-existing damage not disclosed at policy inception
+- Wear and tear, mechanical breakdown, or maintenance issues
+- Damage from nuclear hazard or war
+
+SECTION 10: DEPRECIATION SCHEDULE
+Vehicles 0-3 years: 100% of repair value
+Vehicles 4-6 years: 90% of repair value
+Vehicles 7-10 years: 80% of repair value
+Vehicles over 10 years: 70% of repair value (15% depreciation cap)
+
+SECTION 11: APPROVED REPAIR NETWORK
+Alpine Mutual partners with certified repair facilities nationwide. Using approved facilities guarantees: lifetime warranty on repairs, direct billing, and expedited service. Out-of-network repairs require pre-approval and may result in reduced coverage.
+
+For questions contact: claims@alpinemutual.com | 1-800-ALPINE-1
+Alpine Mutual Insurance Company | 1200 Mountain View Drive, Denver, CO 80202`;
 
     setTextInput(samplePolicy.trim());
-    setDocName("Auto Insurance Policy");
+    setDocName("Alpine Mutual Auto Policy");
     setShowAdd(true);
   };
 
@@ -187,6 +313,16 @@ export default function KnowledgeBaseScreen() {
       >
         <Text style={styles.title}>Knowledge Base</Text>
         <Text style={styles.subtitle}>Policy documents for RAG retrieval</Text>
+
+        {modelLoading && (
+          <BlurView intensity={40} tint="light" style={styles.modelStatus}>
+            <ActivityIndicator color="#000" size="small" />
+            <Text style={styles.modelStatusText}>
+              Loading embedding model...{" "}
+              {modelProgress > 0 ? `${modelProgress}%` : ""}
+            </Text>
+          </BlurView>
+        )}
 
         <View style={styles.buttonRow}>
           <TouchableOpacity onPress={handlePickDocument} style={styles.addBtn}>
@@ -287,7 +423,18 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#F0F0F5" },
   content: { paddingHorizontal: 20 },
   title: { fontSize: 38, fontWeight: "700", color: "#000", marginBottom: 4 },
-  subtitle: { fontSize: 15, color: "#888", marginBottom: 24 },
+  subtitle: { fontSize: 15, color: "#888", marginBottom: 16 },
+  modelStatus: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    padding: 14,
+    borderRadius: 12,
+    marginBottom: 16,
+    backgroundColor: "rgba(255,255,255,0.6)",
+    overflow: "hidden",
+  },
+  modelStatusText: { fontSize: 14, color: "#666" },
   buttonRow: { flexDirection: "row", gap: 12, marginBottom: 16 },
   addBtn: { flex: 1, borderRadius: 14, overflow: "hidden" },
   addBtnInner: {
