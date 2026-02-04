@@ -1,50 +1,156 @@
-# Welcome to your Expo app 👋
+# inspAI Mobile
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+PoC for inspection built with Expo and the Cactus SDK for local model inference.
 
-## Get started
+## Architecture
 
-1. Install dependencies
-
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      iOS Device                              │
+│                                                              │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────┐  │
+│  │   Text Model    │  │  Vision Model   │  │  Knowledge  │  │
+│  │  LFM2-1.2B-RAG  │  │  LFM2-VL-450M   │  │    Base     │  │
+│  │     (INT4)      │  │     (INT4)      │  │ (AsyncStore)│  │
+│  └────────┬────────┘  └────────┬────────┘  └──────┬──────┘  │
+│           │                    │                  │         │
+│           └──────────┬─────────┴──────────────────┘         │
+│                      │                                      │
+│             ┌────────▼────────┐                             │
+│             │   Cactus SDK    │                             │
+│             │ (Neural Engine) │                             │
+│             └────────┬────────┘                             │
+│                      │                                      │
+│             ┌────────▼────────┐                             │
+│             │  React Native   │                             │
+│             │   Application   │                             │
+│             └─────────────────┘                             │
+│                                                              │
+│              No Cloud Dependencies                           │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+The app runs two Liquid AI models locally on the device:
 
-## Learn more
+### Text Model (LFM2-1.2B-RAG)
 
-To learn more about developing your project with Expo, look at the following resources:
+- Optimized for retrieval-augmented generation
+- Handles policy Q&A with document grounding
+- Generates embeddings for semantic document search
+- Supports tool calling for report generation
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+### Vision Model (LFM2-VL-450M)
 
-## Join the community
+- Vision-language model optimized for Apple Neural Engine
+- Analyzes uploaded damage photos
+- Returns damage assessments with severity scoring
 
-Join our community of developers creating universal apps.
+Both models run entirely locally using INT4 quantization, requiring no internet connection after initial download.
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+## Features
+
+### Inspection Chat
+
+- Upload photos from camera or gallery
+- Real-time damage analysis with severity scoring (1-10)
+- Policy-grounded answers using RAG
+- Streaming token output with markdown rendering
+- Source attribution for retrieved context
+
+### Knowledge Base
+
+- PDF and text document ingestion
+- Automatic chunking (500 character segments)
+- On-device embedding generation
+- Cosine similarity retrieval (top-3)
+- Persistent local storage via AsyncStorage
+
+### Report Generation
+
+- Manual trigger via Report button
+- Automatic trigger via tool calling ("generate report")
+- Aggregates all damage assessments from chat
+- Generates formatted PDF with embedded images
+- Share via system sheet
+
+## Technical Details
+
+### RAG Pipeline
+
+```
+Document Ingestion:
+  PDF/Text ──► Chunk (500 chars) ──► Embed ──► Store
+
+Query Time:
+  Query ──► Embed ──► Cosine Similarity ──► Top-K ──► Context Injection ──► LLM
+```
+
+The text model (LFM2-1.2B-RAG) handles both document embeddings (at ingestion) and query embeddings (at retrieval), maintaining vector space alignment.
+
+### Model Routing
+
+```
+User Input
+    │
+    ├── Has Image? ──► Vision Model (LFM2-VL-450M)
+    │                       │
+    │                       ▼
+    │                  Damage Assessment
+    │
+    └── Text Only? ──► RAG Retrieval ──► Text Model (LFM2-1.2B-RAG)
+                                              │
+                                              ├── Normal Response
+                                              └── Tool Call ──► PDF Report
+```
+
+### Tool Calling
+
+The text model supports function calling for automated report generation:
+
+```typescript
+{
+  name: "generate_report",
+  parameters: {
+    severity: number,      // 1-10
+    summary: string,
+    damage_description: string,
+    recommendations: string
+  }
+}
+```
+
+## Requirements
+
+- Node.js 18+
+- Xcode 15+
+- Physical iOS device (models require Neural Engine)
+- ~2GB storage for model weights
+- ~1GB RAM during inference
+
+## Setup
+
+```bash
+npm install
+npx pod-install
+npx expo run:ios
+```
+
+The app downloads model weights on first launch (~1.5GB total). This requires internet connectivity and may take several minutes.
+
+## Project Structure
+
+```
+mobile/
+├── app/
+│   ├── (tabs)/
+│   │   ├── index.tsx          # Home screen with start button
+│   │   ├── explore.tsx        # Knowledge base management
+│   │   └── _layout.tsx        # Tab navigation
+│   ├── inspection/
+│   │   └── [id].tsx           # Main inspection chat interface
+│   └── _layout.tsx            # Root layout
+├── assets/                    # App icons and images
+├── patches/                   # Native module patches
+├── app.json                   # Expo configuration
+└── package.json
+```
