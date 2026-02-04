@@ -66,15 +66,14 @@ export default function KnowledgeBaseScreen() {
   const loadEmbeddingModel = async () => {
     try {
       const lm = new CactusLM({
-        model: "qwen3-0.6b",
-        options: { quantization: "int4", contextSize: 512 },
+        model: "lfm2-1.2b-rag",
+        options: { quantization: "int4" },
       });
 
       await lm.download({
         onProgress: (p) => setModelProgress(Math.round(p * 100)),
       });
 
-      await lm.init();
       cactusRef.current = lm;
     } catch (e) {
       console.error("Failed to load embedding model:", e);
