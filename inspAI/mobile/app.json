@@ -10,7 +10,12 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.mohanadkandil.mobile"
+      "bundleIdentifier": "com.mohanadkandil.mobile",
+      "infoPlist": {
+        "NSCameraUsageDescription": "This app uses the camera to capture photos of damage for inspection analysis.",
+        "NSPhotoLibraryUsageDescription": "This app accesses your photo library to select images for damage inspection.",
+        "NSMicrophoneUsageDescription": "This app may use the microphone for video recording."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -39,6 +44,13 @@
           "dark": {
             "backgroundColor": "#000000"
           }
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "This app uses the camera to capture photos of damage for inspection analysis.",
+          "photosPermission": "This app accesses your photo library to select images for damage inspection."
         }
       ],
       "onnxruntime-react-native",
