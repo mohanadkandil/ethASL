@@ -8,12 +8,12 @@ import {
   Platform,
   ActivityIndicator,
   View,
+  Text,
+  Keyboard,
+  TouchableWithoutFeedback,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { CactusLM, type Message as CactusMessage } from "cactus-react-native";
-
-import { ThemedText } from "@/components/themed-text";
-import { ThemedView } from "@/components/themed-view";
-import { useThemeColor } from "@/hooks/use-theme-color";
 
 type Message = {
   id: string;
@@ -22,6 +22,7 @@ type Message = {
 };
 
 export default function ChatScreen() {
+  const insets = useSafeAreaInsets();
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatHistory, setChatHistory] = useState<CactusMessage[]>([]);
   const [input, setInput] = useState("");
@@ -33,13 +34,9 @@ export default function ChatScreen() {
   const [isGenerating, setIsGenerating] = useState(false);
   const flatListRef = useRef<FlatList>(null);
 
-  const backgroundColor = useThemeColor({}, "background");
-  const textColor = useThemeColor({}, "text");
-
   useEffect(() => {
     loadModel();
     return () => {
-      // Cleanup on unmount
       cactus?.destroy();
     };
   }, []);
@@ -48,55 +45,45 @@ export default function ChatScreen() {
     try {
       setLoading(true);
       setError(null);
-      setLoadingStatus("Initializing Cactus...");
+      setLoadingStatus("Initializing...");
 
       const lm = new CactusLM({
-        model: "qwen3-0.6b",
+        model: "lfm2.5-1.2b-instruct",
         options: {
           quantization: "int4",
           contextSize: 2048,
         },
       });
 
-      setLoadingStatus("Downloading model...\nThis may take a few minutes on first run.");
+      setLoadingStatus("Downloading model...");
 
       await lm.download({
         onProgress: (progress) => {
           const pct = Math.round(progress * 100);
           setDownloadProgress(pct);
-          setLoadingStatus(`Downloading model... ${pct}%`);
+          setLoadingStatus(`Downloading... ${pct}%`);
         },
       });
 
-      setLoadingStatus("Initializing model...\nThis may take a moment.");
-      console.log("[Cactus] Starting init...");
-
-      try {
-        await lm.init();
-        console.log("[Cactus] Init complete!");
-      } catch (initError) {
-        console.error("[Cactus] Init failed:", initError);
-        throw initError;
-      }
+      setLoadingStatus("Loading model...");
+      await lm.init();
 
       setCactus(lm);
       setMessages([
         {
           id: "0",
-          text: "Qwen3-0.6B loaded! Running entirely on your device.\n\nTry asking me something!",
+          text: "Hello! I'm LFM 1.2B by Liquid AI, running entirely on your device. How can I help you?",
           isUser: false,
         },
       ]);
     } catch (e) {
       console.error("[Cactus] Load error:", e);
-      const errorMsg = e instanceof Error
-        ? `${e.name}: ${e.message}`
-        : String(e);
+      const errorMsg = e instanceof Error ? e.message : String(e);
       setError(errorMsg);
       setMessages([
         {
           id: "0",
-          text: `Failed to load model: ${errorMsg}\n\nTip: Try running on a real device instead of simulator.`,
+          text: `Failed to load: ${errorMsg}`,
           isUser: false,
         },
       ]);
@@ -105,33 +92,37 @@ export default function ChatScreen() {
     }
   };
 
+  const cleanResponse = (text: string): string => {
+    // Remove <think>...</think> blocks
+    let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+    // Remove any remaining model tokens
+    cleaned = cleaned.replace(/<\|im_end\|>/gi, '');
+    cleaned = cleaned.replace(/<\|im_start\|>/gi, '');
+    cleaned = cleaned.replace(/<\|endoftext\|>/gi, '');
+    // Trim whitespace
+    return cleaned.trim();
+  };
+
   const generateResponse = async (userMessage: string): Promise<string> => {
-    if (!cactus) {
-      return `Model not loaded. Error: ${error || "Unknown"}`;
-    }
+    if (!cactus) return `Model not loaded.`;
 
     try {
-      // Add user message to history
       const newHistory: CactusMessage[] = [
         ...chatHistory,
         { role: "user", content: userMessage },
       ];
 
-      const result = await cactus.complete({
-        messages: newHistory,
-      });
+      const result = await cactus.complete({ messages: newHistory });
+      const cleanedResponse = cleanResponse(result.response);
 
-      // Update history with assistant response
       setChatHistory([
         ...newHistory,
-        { role: "assistant", content: result.response },
+        { role: "assistant", content: cleanedResponse },
       ]);
 
-      return result.response;
+      return cleanedResponse;
     } catch (e) {
-      console.error("[Cactus] Generation error:", e);
-      const errorMsg = e instanceof Error ? e.message : String(e);
-      return `Generation error: ${errorMsg}`;
+      return `Error: ${e instanceof Error ? e.message : String(e)}`;
     }
   };
 
@@ -139,75 +130,61 @@ export default function ChatScreen() {
     if (!input.trim() || isGenerating) return;
 
     const userText = input.trim();
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      text: userText,
-      isUser: true,
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
+    setMessages((prev) => [...prev, { id: Date.now().toString(), text: userText, isUser: true }]);
     setInput("");
     setIsGenerating(true);
+    Keyboard.dismiss();
 
-    // Add thinking indicator
     const thinkingId = (Date.now() + 1).toString();
-    setMessages((prev) => [
-      ...prev,
-      { id: thinkingId, text: "Thinking...", isUser: false },
-    ]);
+    setMessages((prev) => [...prev, { id: thinkingId, text: "Thinking...", isUser: false }]);
 
     const response = await generateResponse(userText);
 
-    // Replace thinking with actual response
     setMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === thinkingId ? { ...msg, text: response } : msg
-      )
+      prev.map((msg) => (msg.id === thinkingId ? { ...msg, text: response } : msg))
     );
     setIsGenerating(false);
   };
 
   const renderMessage = ({ item }: { item: Message }) => (
-    <View
-      style={[
-        styles.messageContainer,
-        item.isUser ? styles.userMessage : styles.botMessage,
-      ]}
-    >
-      <ThemedText style={item.isUser ? styles.userText : undefined}>
-        {item.text}
-      </ThemedText>
+    <View style={[styles.bubbleRow, item.isUser ? styles.userRow : styles.botRow]}>
+      <View style={[styles.bubble, item.isUser ? styles.userBubble : styles.botBubble]}>
+        <Text style={[styles.bubbleText, item.isUser ? styles.userText : styles.botText]}>
+          {item.text}
+        </Text>
+      </View>
     </View>
   );
 
   if (loading) {
     return (
-      <ThemedView style={styles.loadingContainer}>
-        <ActivityIndicator size="large" />
-        <ThemedText style={styles.loadingText}>{loadingStatus}</ThemedText>
-        {downloadProgress > 0 && downloadProgress < 100 && (
-          <View style={styles.progressBar}>
-            <View
-              style={[styles.progressFill, { width: `${downloadProgress}%` }]}
-            />
-          </View>
-        )}
-      </ThemedView>
+      <View style={[styles.loadingContainer, { paddingTop: insets.top + 60 }]}>
+        <View style={styles.loadingCard}>
+          <ActivityIndicator size="large" color="#007AFF" />
+          <Text style={styles.loadingTitle}>On-Device AI</Text>
+          <Text style={styles.loadingText}>{loadingStatus}</Text>
+          {downloadProgress > 0 && downloadProgress < 100 && (
+            <View style={styles.progressBar}>
+              <View style={[styles.progressFill, { width: `${downloadProgress}%` }]} />
+            </View>
+          )}
+        </View>
+      </View>
     );
   }
 
   return (
     <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor }]}
       behavior={Platform.OS === "ios" ? "padding" : "height"}
-      keyboardVerticalOffset={90}
+      style={styles.container}
+      keyboardVerticalOffset={0}
     >
-      <ThemedView style={styles.header}>
-        <ThemedText type="title">On-Device Chat</ThemedText>
-        <ThemedText type="default" style={styles.subtitle}>
-          Qwen3-0.6B on device
-        </ThemedText>
-      </ThemedView>
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={[styles.header, { paddingTop: insets.top + 10 }]}>
+          <Text style={styles.headerTitle}>Chat</Text>
+          <Text style={styles.headerSubtitle}>LFM 1.2B • On Device</Text>
+        </View>
+      </TouchableWithoutFeedback>
 
       <FlatList
         ref={flatListRef}
@@ -217,32 +194,35 @@ export default function ChatScreen() {
         style={styles.messageList}
         contentContainerStyle={styles.messageListContent}
         onContentSizeChange={() => flatListRef.current?.scrollToEnd()}
+        keyboardDismissMode="interactive"
+        keyboardShouldPersistTaps="handled"
       />
 
-      <ThemedView style={styles.inputContainer}>
-        <TextInput
-          style={[styles.input, { color: textColor, borderColor: textColor }]}
-          value={input}
-          onChangeText={setInput}
-          placeholder="Type a message..."
-          placeholderTextColor="#888"
-          onSubmitEditing={sendMessage}
-          returnKeyType="send"
-          editable={!isGenerating}
-        />
-        <TouchableOpacity
-          style={[
-            styles.sendButton,
-            (!cactus || isGenerating) && styles.sendButtonDisabled,
-          ]}
-          onPress={sendMessage}
-          disabled={!cactus || isGenerating}
-        >
-          <ThemedText style={styles.sendButtonText}>
-            {isGenerating ? "..." : "Send"}
-          </ThemedText>
-        </TouchableOpacity>
-      </ThemedView>
+      <View style={styles.inputBar}>
+        <View style={styles.inputRow}>
+          <View style={styles.inputContainer}>
+            <TextInput
+              style={styles.input}
+              value={input}
+              onChangeText={setInput}
+              placeholder="Ask anything..."
+              placeholderTextColor="#8E8E93"
+              onSubmitEditing={sendMessage}
+              returnKeyType="send"
+              editable={!isGenerating}
+              multiline
+              maxLength={1000}
+            />
+          </View>
+          <TouchableOpacity
+            style={[styles.sendButton, (!cactus || isGenerating || !input.trim()) && styles.sendButtonDisabled]}
+            onPress={sendMessage}
+            disabled={!cactus || isGenerating || !input.trim()}
+          >
+            <Text style={styles.sendButtonText}>↑</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
     </KeyboardAvoidingView>
   );
 }
@@ -250,91 +230,153 @@ export default function ChatScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: "#F2F2F7",
   },
   loadingContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    gap: 16,
+    backgroundColor: "#F2F2F7",
     padding: 32,
   },
+  loadingCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
+    padding: 32,
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 4,
+    width: "100%",
+    maxWidth: 300,
+  },
+  loadingTitle: {
+    fontSize: 20,
+    fontWeight: "600",
+    color: "#000",
+    marginTop: 16,
+  },
   loadingText: {
+    color: "#8E8E93",
     marginTop: 8,
+    fontSize: 15,
     textAlign: "center",
   },
   progressBar: {
-    width: "80%",
-    height: 8,
-    backgroundColor: "#333",
-    borderRadius: 4,
+    width: "100%",
+    height: 4,
+    backgroundColor: "#E5E5EA",
+    borderRadius: 2,
     marginTop: 16,
     overflow: "hidden",
   },
   progressFill: {
     height: "100%",
     backgroundColor: "#007AFF",
+    borderRadius: 2,
   },
   header: {
-    padding: 16,
-    paddingTop: 60,
-    borderBottomWidth: 1,
-    borderBottomColor: "#333",
+    paddingHorizontal: 20,
+    paddingBottom: 12,
+    backgroundColor: "#F2F2F7",
   },
-  subtitle: {
-    opacity: 0.7,
-    marginTop: 4,
+  headerTitle: {
+    fontSize: 34,
+    fontWeight: "700",
+    color: "#000",
+  },
+  headerSubtitle: {
+    fontSize: 13,
+    color: "#8E8E93",
+    marginTop: 2,
   },
   messageList: {
     flex: 1,
   },
   messageListContent: {
     padding: 16,
-    gap: 12,
   },
-  messageContainer: {
+  bubbleRow: {
+    marginVertical: 4,
+  },
+  userRow: {
+    alignItems: "flex-end",
+  },
+  botRow: {
+    alignItems: "flex-start",
+  },
+  bubble: {
     padding: 12,
-    borderRadius: 16,
-    maxWidth: "80%",
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    maxWidth: "85%",
   },
-  userMessage: {
+  userBubble: {
     backgroundColor: "#007AFF",
-    alignSelf: "flex-end",
-    borderBottomRightRadius: 4,
+    borderBottomRightRadius: 6,
   },
-  botMessage: {
-    backgroundColor: "#333",
-    alignSelf: "flex-start",
-    borderBottomLeftRadius: 4,
+  botBubble: {
+    backgroundColor: "#FFFFFF",
+    borderBottomLeftRadius: 6,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  bubbleText: {
+    fontSize: 16,
+    lineHeight: 22,
   },
   userText: {
-    color: "#fff",
+    color: "#FFFFFF",
+  },
+  botText: {
+    color: "#000000",
+  },
+  inputBar: {
+    backgroundColor: "#FFFFFF",
+    paddingTop: 12,
+    paddingBottom: 100,
+    paddingHorizontal: 16,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(0,0,0,0.15)",
+  },
+  inputRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 12,
   },
   inputContainer: {
-    flexDirection: "row",
-    padding: 16,
-    gap: 12,
-    borderTopWidth: 1,
-    borderTopColor: "#333",
+    flex: 1,
+    backgroundColor: "#F2F2F7",
+    borderRadius: 20,
+    minHeight: 40,
   },
   input: {
-    flex: 1,
-    borderWidth: 1,
-    borderRadius: 24,
     paddingHorizontal: 16,
-    paddingVertical: 12,
-    fontSize: 16,
+    paddingTop: 10,
+    paddingBottom: 10,
+    fontSize: 17,
+    color: "#000",
+    maxHeight: 100,
   },
   sendButton: {
     backgroundColor: "#007AFF",
-    borderRadius: 24,
-    paddingHorizontal: 20,
+    borderRadius: 20,
+    width: 40,
+    height: 40,
     justifyContent: "center",
+    alignItems: "center",
   },
   sendButtonDisabled: {
-    opacity: 0.5,
+    backgroundColor: "#D1D1D6",
   },
   sendButtonText: {
     color: "#fff",
     fontWeight: "600",
+    fontSize: 18,
   },
 });

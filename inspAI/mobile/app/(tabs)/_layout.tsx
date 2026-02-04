@@ -1,35 +1,19 @@
-import { Tabs } from 'expo-router';
-import React from 'react';
-
-import { HapticTab } from '@/components/haptic-tab';
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Colors } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import { NativeTabs, Icon, Label } from 'expo-router/unstable-native-tabs';
+import { ThemeProvider, DefaultTheme } from '@react-navigation/native';
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
-
   return (
-    <Tabs
-      screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
-        headerShown: false,
-        tabBarButton: HapticTab,
-      }}>
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'Home',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="house.fill" color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="explore"
-        options={{
-          title: 'Explore',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="paperplane.fill" color={color} />,
-        }}
-      />
-    </Tabs>
+    <ThemeProvider value={DefaultTheme}>
+      <NativeTabs disableTransparentOnScrollEdge>
+        <NativeTabs.Trigger name="index">
+          <Label>Chat</Label>
+          <Icon sf="bubble.left.fill" md="chat" />
+        </NativeTabs.Trigger>
+        <NativeTabs.Trigger name="explore">
+          <Label>Settings</Label>
+          <Icon sf="gearshape.fill" md="settings" />
+        </NativeTabs.Trigger>
+      </NativeTabs>
+    </ThemeProvider>
   );
 }

@@ -8,7 +8,8 @@
       "Bash(npm ls:*)",
       "WebFetch(domain:cactuscompute.com)",
       "Bash(xcode-select:*)",
-      "Bash(xcodebuild -version:*)"
+      "Bash(xcodebuild -version:*)",
+      "Bash(npx expo install:*)"
     ]
   }
 }
