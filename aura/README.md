@@ -4,7 +4,7 @@ An LLM-powered system that investigates ArduPilot flight logs through conversati
 
 ## Architecture
 
-![Aura System Architecture](assets/aurasys.svg)
+<img src="assets/aurasys.svg" alt="Aura System Architecture" width="600">
 
 The LLM never sees raw numbers. Tools translate telemetry → English. The LLM reads English and reasons.
 
