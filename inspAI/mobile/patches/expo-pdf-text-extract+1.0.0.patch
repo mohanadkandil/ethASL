@@ -1,0 +1,10 @@
+diff --git a/node_modules/expo-pdf-text-extract/ios/PdfExtractor.podspec b/node_modules/expo-pdf-text-extract/ios/PdfExtractor.podspec
+index 65f8044..2a087e9 100644
+--- a/node_modules/expo-pdf-text-extract/ios/PdfExtractor.podspec
++++ b/node_modules/expo-pdf-text-extract/ios/PdfExtractor.podspec
+@@ -26,4 +26,5 @@ Pod::Spec.new do |s|
+   }
+ 
+   s.source_files = "**/*.{h,m,swift}"
++  s.exclude_files = "**/*Tests*.swift"
+ end

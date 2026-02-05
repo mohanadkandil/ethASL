@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+
+# uv
+.python-version
+uv.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Project
+plots/
+logs/*.bin
+logs/*.tlog
+*.bin
+*.tlog
+
+# OS
+.DS_Store

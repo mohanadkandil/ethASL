@@ -1,12 +1,9 @@
-"""Flight log parsing utilities using pymavlink."""
-
 from pathlib import Path
 
 import pandas as pd
 from pymavlink import mavutil
 
 
-# Message types we care about
 MESSAGE_TYPES = {
     "IMU": ["TimeUS", "GyrX", "GyrY", "GyrZ", "AccX", "AccY", "AccZ"],
     "RCOU": ["TimeUS", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"],
@@ -76,7 +73,6 @@ class FlightLog:
 
     def get_channel(self, channel: str, t_start: float | None = None, t_end: float | None = None) -> pd.DataFrame:
         """Get data for a specific channel within a time window."""
-        # Handle channel names like "Motor3" -> RCOU.C3
         channel_map = {
             "Motor1": ("RCOU", "C1"),
             "Motor2": ("RCOU", "C2"),
@@ -127,12 +123,10 @@ class FlightLog:
             f"Channels available: {', '.join(self.metadata.get('channels', []))}",
         ]
 
-        # Add mode changes if available
         if "MODE" in self.data and len(self.data["MODE"]) > 0:
             modes = self.data["MODE"]["Mode"].unique().tolist()
             lines.append(f"Flight modes: {', '.join(str(m) for m in modes)}")
 
-        # Add error codes if any
         if "ERR" in self.data and len(self.data["ERR"]) > 0:
             errors = len(self.data["ERR"])
             lines.append(f"Errors logged: {errors}")
@@ -144,12 +138,10 @@ _current_log: FlightLog | None = None
 
 
 def load_log(file_path: str) -> FlightLog:
-    """Load a flight log and store as current."""
     global _current_log
     _current_log = FlightLog(file_path)
     return _current_log
 
 
 def get_current_log() -> FlightLog | None:
-    """Get the currently loaded flight log."""
     return _current_log
